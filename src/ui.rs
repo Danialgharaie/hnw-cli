@@ -93,23 +93,38 @@ fn draw_site_table(frame: &mut Frame, app: &mut App, area: Rect) {
         } else {
             theme::muted()
         };
+        let selection = if app.selected_sites.contains(&site.slug) {
+            "●"
+        } else {
+            "○"
+        };
         Row::new([
+            Cell::from(selection),
             Cell::from(site.label().to_owned()),
             Cell::from(site.status.as_deref().unwrap_or("—").to_owned()).style(status_style),
             Cell::from(relative_time(site.updated_at.as_deref())),
         ])
     });
-    let title = format!(" Sites  {} ", app.sites.len());
+    let title = if app.selected_sites.is_empty() {
+        format!(" Sites  {} ", app.sites.len())
+    } else {
+        format!(
+            " Sites  {} · {} selected ",
+            app.sites.len(),
+            app.selected_sites.len()
+        )
+    };
     let table = Table::new(
         rows,
         [
+            Constraint::Length(3),
             Constraint::Percentage(58),
             Constraint::Length(11),
             Constraint::Length(13),
         ],
     )
     .header(
-        Row::new(["NAME / SLUG", "STATUS", "UPDATED"])
+        Row::new(["", "NAME / SLUG", "STATUS", "UPDATED"])
             .style(theme::muted().add_modifier(Modifier::BOLD))
             .bottom_margin(1),
     )
@@ -402,9 +417,7 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
         Style::default().fg(theme::MUTED).bg(theme::PANEL)
     };
     let shortcuts = match app.section {
-        Section::Sites => {
-            " / search  Enter inspect  e rename  d duplicate  x delete  a stats  ? help "
-        }
+        Section::Sites => " Space select  x delete  / search  Enter inspect  r refresh  ? help ",
         Section::Drives => " Enter files  o dashboard  r refresh  ? help ",
         Section::Account => " Enter open  r refresh  ? help ",
     };
@@ -435,9 +448,11 @@ fn draw_help(frame: &mut Frame) {
         key_line("j k / ↑ ↓", "move selection"),
         key_line("Enter", "inspect Site or Drive"),
         key_line("/", "search Sites"),
+        key_line("Space", "toggle Site selection"),
+        key_line("A / Esc", "select all visible / clear"),
         key_line("e", "rename selected Site"),
         key_line("d", "duplicate selected Site"),
-        key_line("x", "delete selected Site (confirmed)"),
+        key_line("x", "delete marked Sites (confirmed)"),
         key_line("a", "load 30-day Site analytics"),
         key_line("o", "open selected resource"),
         key_line("r", "refresh and clear search"),
@@ -459,16 +474,26 @@ fn draw_prompt(frame: &mut Frame, prompt: &Prompt, input: &str) {
     let (title, text, style) = match prompt {
         Prompt::Search => (" Search Sites ", format!("/ {input}"), theme::accent()),
         Prompt::EditName => (" Rename Site ", input.to_owned(), theme::accent()),
-        Prompt::ConfirmDelete { slug } => (
-            " Permanently delete Site? ",
-            format!(
-                "{slug}\n\nThis deletes all stored files. Press y to delete or n/Esc to cancel."
-            ),
-            Style::default().fg(theme::DANGER).bg(theme::PAPER),
-        ),
+        Prompt::ConfirmDelete { slugs } => {
+            let shown = slugs.iter().take(7).cloned().collect::<Vec<_>>().join("\n");
+            let remainder = slugs.len().saturating_sub(7);
+            let more = if remainder > 0 {
+                format!("\n… and {remainder} more")
+            } else {
+                String::new()
+            };
+            (
+                " Permanently delete Sites? ",
+                format!(
+                    "Delete {} Site(s):\n{shown}{more}\n\nPress y to delete or n/Esc to cancel.",
+                    slugs.len()
+                ),
+                Style::default().fg(theme::DANGER).bg(theme::PAPER),
+            )
+        }
     };
     let height = if matches!(prompt, Prompt::ConfirmDelete { .. }) {
-        9
+        16
     } else {
         5
     };

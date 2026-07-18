@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{collections::HashSet, time::Duration};
 
 use anyhow::Result;
 use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -35,7 +35,7 @@ impl Section {
 pub enum Prompt {
     Search,
     EditName,
-    ConfirmDelete { slug: String },
+    ConfirmDelete { slugs: Vec<String> },
 }
 
 pub struct App {
@@ -43,6 +43,7 @@ pub struct App {
     pub section: Section,
     pub sites: Vec<Site>,
     pub site_state: TableState,
+    pub selected_sites: HashSet<String>,
     pub site_detail: Option<Site>,
     pub analytics: Option<Analytics>,
     pub drives: Vec<Drive>,
@@ -68,6 +69,7 @@ impl App {
             section: Section::Sites,
             sites: Vec::new(),
             site_state,
+            selected_sites: HashSet::new(),
             site_detail: None,
             analytics: None,
             drives: Vec::new(),
@@ -114,6 +116,7 @@ impl App {
     pub async fn refresh(&mut self) {
         self.status = "Refreshing…".into();
         self.error = None;
+        let selected_slug = self.selected_site().map(|site| site.slug.clone());
         let (sites, drives, profile) = tokio::join!(
             self.client.sites(),
             self.client.drives(),
@@ -122,7 +125,9 @@ impl App {
         match sites {
             Ok(sites) => {
                 self.sites = sites;
-                self.clamp_site_selection();
+                self.selected_sites
+                    .retain(|slug| self.sites.iter().any(|site| &site.slug == slug));
+                self.restore_site_selection(selected_slug.as_deref());
             }
             Err(error) => self.error = Some(error.to_string()),
         }
@@ -137,7 +142,27 @@ impl App {
             Ok(profile) => self.profile = Some(profile),
             Err(error) => self.error = Some(error.to_string()),
         }
-        self.status = format!("{} Sites · {} Drives", self.sites.len(), self.drives.len());
+
+        let counts = format!("{} Sites · {} Drives", self.sites.len(), self.drives.len());
+        if let Some(slug) = self.selected_site().map(|site| site.slug.clone()) {
+            match self.client.site(&slug).await {
+                Ok(site) => {
+                    let files = site.manifest.len();
+                    self.site_detail = Some(site);
+                    self.analytics = None;
+                    self.status = format!("{counts} · {files} files in {slug}");
+                }
+                Err(error) => {
+                    self.site_detail = None;
+                    self.error = Some(error.to_string());
+                    self.status = counts;
+                }
+            }
+        } else {
+            self.site_detail = None;
+            self.analytics = None;
+            self.status = counts;
+        }
     }
 
     async fn handle_key(&mut self, key: KeyEvent) {
@@ -162,6 +187,12 @@ impl App {
             KeyCode::Char('g') | KeyCode::Home => self.select_edge(false),
             KeyCode::Char('G') | KeyCode::End => self.select_edge(true),
             KeyCode::Char('r') => self.refresh().await,
+            KeyCode::Char(' ') if self.section == Section::Sites => self.toggle_selected_site(),
+            KeyCode::Char('A') if self.section == Section::Sites => self.select_all_sites(),
+            KeyCode::Esc if self.section == Section::Sites => {
+                self.selected_sites.clear();
+                self.status = "Selection cleared".into();
+            }
             KeyCode::Char('/') if self.section == Section::Sites => {
                 self.prompt = Some(Prompt::Search);
                 self.input.clear();
@@ -178,19 +209,33 @@ impl App {
 
     async fn handle_prompt_key(&mut self, key: KeyEvent) {
         let prompt = self.prompt.clone().expect("prompt exists");
-        if let Prompt::ConfirmDelete { slug } = prompt {
+        if let Prompt::ConfirmDelete { slugs } = prompt {
             match key.code {
                 KeyCode::Char('y') => {
                     self.prompt = None;
-                    self.status = format!("Deleting {slug}…");
-                    match self.client.delete_site(&slug).await {
-                        Ok(()) => {
-                            self.status = format!("Deleted {slug}");
-                            self.site_detail = None;
-                            self.analytics = None;
-                            self.refresh().await;
+                    let total = slugs.len();
+                    let mut deleted = 0;
+                    let mut failures = Vec::new();
+                    for slug in slugs {
+                        self.status = format!("Deleting {slug}… ({}/{total})", deleted + 1);
+                        match self.client.delete_site(&slug).await {
+                            Ok(()) => {
+                                deleted += 1;
+                                self.selected_sites.remove(&slug);
+                            }
+                            Err(error) => failures.push(format!("{slug}: {error}")),
                         }
-                        Err(error) => self.error = Some(error.to_string()),
+                    }
+                    self.site_detail = None;
+                    self.analytics = None;
+                    self.refresh().await;
+                    if failures.is_empty() {
+                        self.status = format!("Deleted {deleted} Site(s)");
+                    } else {
+                        self.error = Some(format!(
+                            "Deleted {deleted}/{total}; failed: {}",
+                            failures.join(" · ")
+                        ));
                     }
                 }
                 KeyCode::Esc | KeyCode::Char('n') => self.prompt = None,
@@ -234,6 +279,7 @@ impl App {
         match self.client.search(query).await {
             Ok(sites) => {
                 self.sites = sites;
+                self.selected_sites.clear();
                 self.site_state
                     .select((!self.sites.is_empty()).then_some(0));
                 self.site_detail = None;
@@ -335,11 +381,30 @@ impl App {
     }
 
     fn begin_delete(&mut self) {
-        if let Some(site) = self.selected_site() {
-            self.prompt = Some(Prompt::ConfirmDelete {
-                slug: site.slug.clone(),
-            });
+        let slugs = deletion_targets(
+            &self.sites,
+            &self.selected_sites,
+            self.site_state.selected(),
+        );
+        if !slugs.is_empty() {
+            self.prompt = Some(Prompt::ConfirmDelete { slugs });
         }
+    }
+
+    fn toggle_selected_site(&mut self) {
+        let Some(slug) = self.selected_site().map(|site| site.slug.clone()) else {
+            return;
+        };
+        if !self.selected_sites.insert(slug.clone()) {
+            self.selected_sites.remove(&slug);
+        }
+        self.status = format!("{} Site(s) selected", self.selected_sites.len());
+    }
+
+    fn select_all_sites(&mut self) {
+        self.selected_sites
+            .extend(self.sites.iter().map(|site| site.slug.clone()));
+        self.status = format!("{} Site(s) selected", self.selected_sites.len());
     }
 
     fn open_selected(&mut self) {
@@ -408,6 +473,18 @@ impl App {
             .select((!self.sites.is_empty()).then_some(selected));
     }
 
+    fn restore_site_selection(&mut self, slug: Option<&str>) {
+        if let Some(index) = slug.and_then(|slug| {
+            self.sites
+                .iter()
+                .position(|site| site.slug.as_str() == slug)
+        }) {
+            self.site_state.select(Some(index));
+        } else {
+            self.clamp_site_selection();
+        }
+    }
+
     fn clamp_drive_selection(&mut self) {
         let selected = self
             .drive_state
@@ -431,6 +508,25 @@ impl App {
     }
 }
 
+fn deletion_targets(
+    sites: &[Site],
+    selected: &HashSet<String>,
+    active_index: Option<usize>,
+) -> Vec<String> {
+    if selected.is_empty() {
+        active_index
+            .and_then(|index| sites.get(index))
+            .map(|site| vec![site.slug.clone()])
+            .unwrap_or_default()
+    } else {
+        sites
+            .iter()
+            .filter(|site| selected.contains(&site.slug))
+            .map(|site| site.slug.clone())
+            .collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -444,5 +540,54 @@ mod tests {
         };
         assert_eq!(section, Section::Drives);
         assert_eq!(Section::ALL.len(), 3);
+    }
+
+    #[test]
+    fn site_selection_is_restored_by_slug() {
+        let mut state = TableState::default();
+        state.select(Some(0));
+        let sites = [
+            Site {
+                slug: "newer".into(),
+                ..Default::default()
+            },
+            Site {
+                slug: "selected".into(),
+                ..Default::default()
+            },
+        ];
+        let index = sites
+            .iter()
+            .position(|site| site.slug == "selected")
+            .unwrap();
+        state.select(Some(index));
+        assert_eq!(state.selected(), Some(1));
+    }
+
+    #[test]
+    fn batch_delete_targets_marked_sites_in_visible_order() {
+        let sites = [
+            Site {
+                slug: "first".into(),
+                ..Default::default()
+            },
+            Site {
+                slug: "second".into(),
+                ..Default::default()
+            },
+            Site {
+                slug: "third".into(),
+                ..Default::default()
+            },
+        ];
+        let selected = HashSet::from(["first".to_owned(), "third".to_owned()]);
+        assert_eq!(
+            deletion_targets(&sites, &selected, Some(1)),
+            ["first", "third"]
+        );
+        assert_eq!(
+            deletion_targets(&sites, &HashSet::new(), Some(1)),
+            ["second"]
+        );
     }
 }
