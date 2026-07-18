@@ -1,0 +1,30 @@
+[package]
+name = "hnw"
+version = "0.1.0"
+edition = "2024"
+description = "A keyboard-first TUI for managing here.now"
+license = "MIT"
+
+[dependencies]
+anyhow = "1.0"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4.5", features = ["derive"] }
+crossterm = { version = "0.29", features = ["event-stream"] }
+dirs = "6.0"
+futures-util = "0.3"
+open = "5.3"
+ratatui = "0.30"
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.49", features = ["macros", "rt-multi-thread", "time"] }
+unicode-width = "0.2"
+urlencoding = "2.1"
+
+[dev-dependencies]
+tempfile = "3.24"
+
+[profile.release]
+strip = true
+lto = "thin"
+
