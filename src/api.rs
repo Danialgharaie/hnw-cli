@@ -1,6 +1,7 @@
 use std::{env, fs, path::PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};
+use futures_util::{StreamExt, stream};
 use reqwest::{Client, Method, StatusCode};
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
@@ -72,6 +73,36 @@ impl HereNowClient {
             .request::<SitesResponse>(Method::GET, "/api/v1/publishes")
             .await?
             .publishes)
+    }
+
+    pub async fn sites_with_details(&self) -> Result<(Vec<Site>, Vec<String>)> {
+        let summaries = self.sites().await?;
+        let mut results = stream::iter(summaries.into_iter().enumerate())
+            .map(|(index, summary)| {
+                let client = self.clone();
+                async move {
+                    let slug = summary.slug.clone();
+                    let result = client.site(&slug).await;
+                    (index, slug, summary, result)
+                }
+            })
+            .buffer_unordered(8)
+            .collect::<Vec<_>>()
+            .await;
+        results.sort_by_key(|(index, _, _, _)| *index);
+
+        let mut sites = Vec::with_capacity(results.len());
+        let mut failures = Vec::new();
+        for (_, slug, summary, result) in results {
+            match result {
+                Ok(site) => sites.push(site),
+                Err(error) => {
+                    failures.push(format!("{slug}: {error}"));
+                    sites.push(summary);
+                }
+            }
+        }
+        Ok((sites, failures))
     }
 
     pub async fn site(&self, slug: &str) -> Result<Site> {

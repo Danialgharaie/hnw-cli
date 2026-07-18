@@ -203,11 +203,7 @@ fn draw_site_detail(frame: &mut Frame, app: &App, area: Rect) {
             ]))
         })
         .collect();
-    let file_title = if site.manifest.is_empty() {
-        " Files · Enter to load ".to_owned()
-    } else {
-        format!(" Files  {} ", site.manifest.len())
-    };
+    let file_title = format!(" Files  {} ", site.manifest.len());
     frame.render_widget(List::new(files).block(panel(&file_title)), layout[1]);
 }
 

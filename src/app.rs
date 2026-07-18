@@ -118,16 +118,22 @@ impl App {
         self.error = None;
         let selected_slug = self.selected_site().map(|site| site.slug.clone());
         let (sites, drives, profile) = tokio::join!(
-            self.client.sites(),
+            self.client.sites_with_details(),
             self.client.drives(),
             self.client.profile()
         );
         match sites {
-            Ok(sites) => {
+            Ok((sites, failures)) => {
                 self.sites = sites;
                 self.selected_sites
                     .retain(|slug| self.sites.iter().any(|site| &site.slug == slug));
                 self.restore_site_selection(selected_slug.as_deref());
+                if !failures.is_empty() {
+                    self.error = Some(format!(
+                        "{} Site detail request(s) failed; summaries retained",
+                        failures.len()
+                    ));
+                }
             }
             Err(error) => self.error = Some(error.to_string()),
         }
@@ -143,26 +149,18 @@ impl App {
             Err(error) => self.error = Some(error.to_string()),
         }
 
-        let counts = format!("{} Sites · {} Drives", self.sites.len(), self.drives.len());
-        if let Some(slug) = self.selected_site().map(|site| site.slug.clone()) {
-            match self.client.site(&slug).await {
-                Ok(site) => {
-                    let files = site.manifest.len();
-                    self.site_detail = Some(site);
-                    self.analytics = None;
-                    self.status = format!("{counts} · {files} files in {slug}");
-                }
-                Err(error) => {
-                    self.site_detail = None;
-                    self.error = Some(error.to_string());
-                    self.status = counts;
-                }
-            }
-        } else {
-            self.site_detail = None;
-            self.analytics = None;
-            self.status = counts;
-        }
+        let files = self
+            .sites
+            .iter()
+            .map(|site| site.manifest.len())
+            .sum::<usize>();
+        self.site_detail = self.selected_site().cloned();
+        self.analytics = None;
+        self.status = format!(
+            "{} Sites · {files} files loaded · {} Drives",
+            self.sites.len(),
+            self.drives.len()
+        );
     }
 
     async fn handle_key(&mut self, key: KeyEvent) {

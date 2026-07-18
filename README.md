@@ -17,7 +17,7 @@ Authentication is resolved in this order:
 
 ## What it manages
 
-- Sites: list, search indexed content, inspect file manifests, rename, duplicate, open, view 30-day analytics, and batch-delete selected Sites with confirmation.
+- Sites: preload every Site's details and file manifest, search indexed content, rename, duplicate, open, view 30-day analytics, and batch-delete selected Sites with confirmation.
 - Drives: list Drives, browse their files, and open the selected Drive in the here.now dashboard.
 - Account: inspect and open the public profile.
 
